@@ -1,5 +1,5 @@
 
-inspired by (ig-json-parser)[https://github.com/Instagram/ig-json-parser]
+inspired by [ig-json-parser](https://github.com/Instagram/ig-json-parser)
 
 the difference is:
 
