@@ -14,6 +14,7 @@ the difference is:
 
 * including a class `JsonToSpec` which can generate the spec from a dictionary of json samples. most of time you will want to customize the result by editing the result spec
 * you can write converter code to convert between types:
+
     ```scala
           lazy val ApiTimeStringToDate = ConvertedType(StringType, JavaObjectType("java.util.Date"), "ApiTimeStringToDate", "DateToApiTimeString")
     ```
