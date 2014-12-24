@@ -428,7 +428,7 @@ object JsonToSpec {
     val cs = jsonDirToSpec(dir)
 
     def c(s: ObjectType) = {
-      s"""val ${s.typeName} = ${s.toString}"""
+      s"""lazy val ${s.typeName} = ${s.toString}"""
     }
     s"""
        |
