@@ -12,7 +12,7 @@ the difference is:
 
     * one small drawback is if you data is recursive, you need to link the recursive data outside a constructor
 
-* including a class `JsonToSpec` which can generate the spec from a dictionary of json samples. most of time you will want to customize the result by editing the result spec
+* including a class `JsonToSpec` which can generate the spec from a folder of json samples. so you not even need to write the spec if you have a working backend. but most of time you will want to customize the result by editing the result spec
 * you can write converter code to convert between types:
 
     ```scala
