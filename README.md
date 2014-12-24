@@ -1,7 +1,7 @@
 
 inspired by [ig-json-parser](https://github.com/Instagram/ig-json-parser). it basically do the same thing as ig-json-parser. but...
 
-the difference is:
+the differences are:
 
 * do not use annotations to generate the parsers. but use Scala raw value like:
     ```scala
