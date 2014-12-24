@@ -19,5 +19,5 @@ the difference is:
           lazy val ApiTimeStringToDate = ConvertedType(StringType, JavaObjectType("java.util.Date"), "ApiTimeStringToDate", "DateToApiTimeString")
     ```
 * it is dead simple
-    * you should be able to use it from commandline, or in any build tool you use
+    * you should be able to use it from command line, or in any build tool you use
     * you can easily customize this thing. as the code is very short
