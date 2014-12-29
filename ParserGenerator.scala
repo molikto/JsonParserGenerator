@@ -105,8 +105,10 @@ case class ClassFile(packageName: String, className: String, content: String) {
        | import com.fasterxml.jackson.core.JsonGenerator;
        | import com.fasterxml.jackson.core.JsonParser;
        | import com.fasterxml.jackson.core.JsonToken;
+       | import com.fasterxml.jackson.core.JsonParseException;
        | import java.io.IOException;
        | import java.io.StringWriter;
+       | import java.io.InputStream;
        |
        | import java.util.ArrayList;
        |
@@ -128,7 +130,17 @@ object GenerateContent extends (Spec => Seq[ClassFile]) {
        | }
      """.stripMargin)
 
-  override def apply(v1: Spec): Seq[ClassFile] = v1.classSpecs.map(c => singleClass(v1, c)) ++ Seq(JsonFactory(v1))
+
+  def StreamParser(s: Spec) = ClassFile(s.packageName, "StreamParser",
+    s"""
+       | import com.fasterxml.jackson.core.JsonParseException;
+       | import java.io.InputStream;
+       | public interface StreamParser<T> {
+       |   public T parse(InputStream in) throws IOException, JsonParseException;
+       | }
+     """.stripMargin)
+
+  override def apply(v1: Spec): Seq[ClassFile] = v1.classSpecs.map(c => singleClass(v1, c)) ++ Seq(JsonFactory(v1), StreamParser(v1))
 
   def extractValue(spec: Spec, t: JsonType): (String, String) = {
     val pre_extract_value = t match {
@@ -309,6 +321,18 @@ object GenerateContent extends (Spec => Seq[ClassFile]) {
 
       val parser =
         s"""
+           |
+           |
+           |     static final class Parser implements StreamParser<${name}> {
+           |         @Override
+           |         public ${name} parse(InputStream in) throws IOException, JsonParseException {
+           |            JsonParser jp = JsonFactoryHolder.APP_FACTORY.createParser(in);
+           |            jp.nextToken();
+           |            return ${name}.parse(jp);
+           |        }
+           |     }
+           |     public static Parser parser = new Parser();
+           |
            |  public static final ${name} parse(JsonParser jp) throws IOException {
            |    ${name} instance = new ${name}();
            |    if (jp.getCurrentToken() != JsonToken.START_OBJECT) {
@@ -352,8 +376,22 @@ object GenerateContent extends (Spec => Seq[ClassFile]) {
            |    generator.close();
            |    return stringWriter.toString();
            |  }
+           |
+           |  public String toString() {
+           |    try {
+           |      return serialize();
+           |    } catch (Exception e) {
+           |       e.printStackTrace();
+           |       return null;
+           |    }
+           |  }
          """.stripMargin
-      val content = s"""public final class ${name} {
+      val content =
+        s"""
+         | /**
+         | all content auto-generated, so do not modify. they will be overwritten
+         | */
+         | public final class ${name} {
          |   ${dataFields}
          |   ${parser}
          | }
@@ -445,9 +483,6 @@ trait Spec {
   val converterClassName: String
   val packageName: String
 }
-
-
-
 
 object TestSpec extends Spec {
 
