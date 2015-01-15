@@ -44,6 +44,10 @@ case object StringType extends JsonType {
   override def typeName = "String"
 }
 
+case class EnumType(clzName: String, vals: Seq[String]) extends JsonType {
+  override def typeName = clzName
+}
+
 case object UnknownType extends JsonType {
   override def typeName = "Object"
 }
@@ -51,7 +55,8 @@ case object BooleanType extends JsonType {
   override def typeName = "boolean"
 }
 
-case class Field(jsonFieldName: String, fieldName: String, var fieldType: JsonType, nullable: Boolean = true) {
+
+case class Field(jsonFieldName: String, fieldName: String, var fieldType: JsonType, nullable: Boolean = true, serializable: Boolean = true) {
 
 
   def convertedFieldType = fieldType match {
@@ -75,6 +80,12 @@ case class ObjectType(name: String, fields: Seq[Field]) extends JsonType {
 case class ArrayType(itemType: JsonType, fixLength: Int = -1) extends JsonType {
   override def typeName = if (fixLength != -1) "/* fixed length " + fixLength + " */" + itemType.typeName + "[]" else "List<" + itemType.typeName + ">"
   override def toString: String = s"""ArrayType(${Utils.typeRefName(itemType)}${if (fixLength != -1) ", true" else ""})"""
+}
+
+
+case class MapType(itemType: JsonType) extends JsonType {
+  override def typeName = "java.util.LinkedHashMap<String," + itemType.typeName + ">"
+  override def toString: String =  s"""MapType(${Utils.typeRefName(itemType)})"""
 }
 
 case class JavaObjectType(name: String) extends JsonType {
@@ -140,13 +151,55 @@ object GenerateContent extends (Spec => Seq[ClassFile]) {
        | }
      """.stripMargin)
 
-  override def apply(v1: Spec): Seq[ClassFile] = v1.classSpecs.map(c => singleClass(v1, c)) ++ Seq(JsonFactory(v1), StreamParser(v1))
+  override def apply(v1: Spec): Seq[ClassFile] = v1.classSpecs.map(c => singleClass(v1, c)) ++ Seq(JsonFactory(v1), StreamParser(v1)) ++ v1.enumSpecs.map(c => singleEnum(v1, c))
+
+
+  def singleEnum(s: Spec, t: EnumType): ClassFile = ClassFile(s.packageName, t.clzName, {
+
+    val JavaKeywords = Seq("default")
+    def declear_item(s: String): String = {
+      if (JavaKeywords.contains(s)) s"""${s}_ { @Override public String toString(){ return "${s}";}}""" else s
+    }
+    val _override_value_if_necessary = {
+      val keywords = JavaKeywords.toSet.intersect(t.vals.toSet)
+      keywords.map(k =>
+        s"""        if (${k}_.toString().equals(value)) return ${k}_;
+         """.stripMargin).mkString
+    }
+    s"""
+     |public enum ${t.clzName} {
+     |   ${t.vals.map(declear_item).mkString(", ")};
+     |   public static ${t.clzName} fromString(String value) {
+     |     ${_override_value_if_necessary}
+     |     return valueOf(value);
+     |   }
+     |}
+   """.stripMargin
+  }
+  )
 
   def extractValue(spec: Spec, t: JsonType): (String, String) = {
     val pre_extract_value = t match {
       case ConvertedType(o, c, converter, reverter) =>
         val item_extract_value = extractValue(spec, o)
         item_extract_value._1
+      case MapType(it) =>
+        val item_extract_value = extractValue(spec, it)
+        s"""
+      java.util.LinkedHashMap<String, ${it.typeName}> mapValue = new java.util.LinkedHashMap<String, ${it.typeName}>();
+    if (jp.getCurrentToken() != JsonToken.START_OBJECT) {
+      jp.skipChildren();
+    } else {
+    while (jp.nextToken() != JsonToken.END_OBJECT) {
+      String fieldName1 = jp.getCurrentName();
+      jp.nextToken();
+        ${item_extract_value._1}
+        mapValue.put(fieldName1, ${item_extract_value._2});
+      jp.skipChildren();
+    }
+    }
+
+         """.stripMargin
       case ArrayType(it, length) =>
         val item_extract_value = extractValue(spec, it)
         val assgin_value_not_null = if (length >= 0) {
@@ -199,10 +252,12 @@ object GenerateContent extends (Spec => Seq[ClassFile]) {
     }
     val extract_value = t match {
       case StringType => "(jp.getCurrentToken() == JsonToken.VALUE_NULL ? null : jp.getText())"
+      case EnumType(c, vals) => s"(jp.getCurrentToken() == JsonToken.VALUE_NULL ? null : ${c}.fromString((jp.getText())))"
       case BooleanType => "jp.getValueAsBoolean()"
       case IntType => "jp.getValueAsInt()"
       case ObjectType(a, _) => a + ".parse(jp)"
       case ArrayType(t, length) => "arrayValue"
+      case MapType(t) => "mapValue"
       case ConvertedType(o, c, converter, _) =>
         val item_extract_value = extractValue(spec, o)
         s"${spec.converterClassName}.${converter}(${item_extract_value._2});"
@@ -213,11 +268,59 @@ object GenerateContent extends (Spec => Seq[ClassFile]) {
   }
 
 
+
   def singleClass(spec: Spec, t: ObjectType): ClassFile = t match {
     case ObjectType(name, fields) =>
       val dataFields = fields.map(field => {
         s"public  ${field.fieldType.typeName} ${field.fieldName};"
       }).mkString("\n")
+
+//      def copy_field_val(fieldType: JsonType, fromVal: String): (String, String) = fieldType match {
+//        case IntType | StringType | DoubleType | LongType | BooleanType => ("", s"${fromVal}")
+//        case MapType(it) =>
+//          it match {
+//            case ArrayType(ait, n) =>
+//              if (n < 0) {
+//                ait match {
+//                  case StringType =>
+//
+//                }
+//              } else {
+//                throw new Exception("fdsa")
+//              }
+//          }
+//        case ConvertedType(o, c, fc, fr) =>
+//          val name1 = Utils.newName
+//          s"""
+//             | ${o.typeName}
+//           """.stripMargin
+//          val c = copy_field_val(o, )
+//        case ArrayType(it, n) =>
+//          val nname = Utils.newName
+//          (if (n >= 0) {
+//          s"""
+//             |${it.typeName}[] ${nname} =null;
+//             |if (${fromVal} != null) {
+//             | ${nname} = new ${it.typeName}[${n}];
+//             | for (int i = 0; i < ${n}; i++) {
+//             |   ${copy_field_val(it, fromVal + "[i]")}
+//             |   ${nname}[i] = ${copy_field_val(it, fromVal + "[i]")._2};
+//             | }
+//             | }
+//           """.stripMargin
+//        } else {
+//            s"""
+//             |ArrayList<${it.typeName}> ${nname} = null;
+//             |if (${fromVal} != null) {
+//             | ${nname} = new ArrayList<${it.typeName}>(${n});
+//             | for (int i = 0; i < ${n}; i++) {
+//             |   ${copy_field_val(it, fromVal + ".get(i)")}
+//             |   ${nname}.add(${copy_field_val(it, fromVal + ".get(i)")._2});
+//             | }
+//             | }
+//           """.stripMargin
+//        }, nname)
+//      }
       def if_jsonField_equals_fieldName_then_parse_field(field: Field): String = {
         val oType = field.originalFieldType
         val (pre_extract_value, extract_value) = extractValue(spec, field.originalFieldType)
@@ -252,6 +355,14 @@ object GenerateContent extends (Spec => Seq[ClassFile]) {
                |   generator.writeString(${varName});
                | }
              """.stripMargin
+          case EnumType(c, vals) =>
+            s"""
+               | ${newValString}
+               | if (${varName} != null) {
+               |   generator.writeString(${varName}.toString());
+               | }
+             """.stripMargin
+
           case ObjectType(_, _) =>
             s"""
                |
@@ -271,6 +382,7 @@ object GenerateContent extends (Spec => Seq[ClassFile]) {
         }
       }
 
+
       def write_field_if_not_null(fieldName: String, value: String, t: JsonType, newVar: Boolean = false): String = {
 
         val newName = Utils.newName
@@ -282,6 +394,14 @@ object GenerateContent extends (Spec => Seq[ClassFile]) {
                | ${newValString}
                | if (${varName} != null) {
                |   generator.writeStringField("${fieldName}", ${varName});
+               | }
+             """.stripMargin
+
+          case EnumType(c, vals)=>
+            s"""
+               | ${newValString}
+               | if (${varName} != null) {
+               |   generator.writeStringField("${fieldName}", ${varName}.toString());
                | }
              """.stripMargin
           case IntType =>
@@ -296,6 +416,10 @@ object GenerateContent extends (Spec => Seq[ClassFile]) {
                |    generator.writeFieldName("${fieldName}");
                |    ${varName}.serialize(generator, true);
                | }
+             """.stripMargin
+          case MapType(it) =>
+            s"""
+                // TODO not implemented yet
              """.stripMargin
           case ArrayType(it, length) =>
             s"""
@@ -323,7 +447,7 @@ object GenerateContent extends (Spec => Seq[ClassFile]) {
         s"""
            |
            |
-           |     static final class Parser implements StreamParser<${name}> {
+           |     public static final class Parser implements StreamParser<${name}> {
            |         @Override
            |         public ${name} parse(InputStream in) throws IOException, JsonParseException {
            |            JsonParser jp = JsonFactoryHolder.APP_FACTORY.createParser(in);
@@ -363,7 +487,7 @@ object GenerateContent extends (Spec => Seq[ClassFile]) {
            |    if (writeStartAndEnd) {
            |      generator.writeStartObject();
            |    }
-           |    ${fields.map(a => write_field_if_not_null(a.jsonFieldName, a.fieldName, a.fieldType)).mkString}
+           |    ${fields.map(a => if (a.serializable) write_field_if_not_null(a.jsonFieldName, a.fieldName, a.fieldType) else "").mkString}
            |    if (writeStartAndEnd) {
            |      generator.writeEndObject();
            |    }
@@ -391,9 +515,28 @@ object GenerateContent extends (Spec => Seq[ClassFile]) {
          | /**
          | all content auto-generated, so do not modify. they will be overwritten
          | */
-         | public final class ${name} {
+         | public final class ${name} implements Cloneable {
          |   ${dataFields}
          |   ${parser}
+         |
+         |   public ${name} deepCopy() {
+         |   // the funny thing is that it is faster than java Serialization
+         |       try {
+         |           return  parse(toString());
+         |      } catch (IOException e) {
+         |          e.printStackTrace();
+         |      }
+         |      return null;
+         |   }
+         |   public ${name} shallowCopy() {
+         |   try {
+         |     return (${name}) clone();
+         |   } catch (CloneNotSupportedException e) {
+         |     e.printStackTrace();
+         |   }
+         |  return null;
+         |  }
+         |
          | }
        """.stripMargin
       ClassFile(spec.packageName, name, content)
@@ -480,9 +623,11 @@ object JsonToSpec {
 
 trait Spec {
   val classSpecs: Seq[ObjectType]
+  val enumSpecs: Seq[EnumType]
   val converterClassName: String
   val packageName: String
 }
+
 
 object TestSpec extends Spec {
 
@@ -580,7 +725,8 @@ object TestSpec extends Spec {
   RawPicture.fields.last.fieldType = ArrayType(RawPicture)
 
   override val converterClassName: String = "Converter"
-
+  
+  override lazy val enumSpecs: Seq[EnumType] = Seq.empty
   override lazy val classSpecs: Seq[ObjectType] = Seq(Meta, Data, UserIdBoxed, Conversation, PhoneNumber, Tag, Profile,Setting, User, Message, RawPicture)
   override val packageName: String = "org.snailya.test"
 }
