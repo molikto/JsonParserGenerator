@@ -12,12 +12,12 @@ the differences are:
 
     * one small drawback is if you data is recursive, you need to link the recursive data outside a constructor
 * more powerful
-    * you can write converter code to convert between types:
+    * you can write converter code to convert between types, so basically you can have all your stuff, so basically you can inject any code you want when parsing:
 
     ```scala
     lazy val ApiTimeStringToDate = ConvertedType(StringType, JavaObjectType("java.util.Date"), "ApiTimeStringToDate", "DateToApiTimeString")
     ```
-    * can also generate enum type and map types
+    * can also generate enum type and map types, if you are too lazy to write the converter code
 
 * including a class `JsonToSpec` which can generate the spec from a folder of json samples. so you not even need to write the spec if you have a working backend. but most of time you will want to customize the result by editing the result spec
 * it is dead simple
