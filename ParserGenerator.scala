@@ -12,11 +12,12 @@ import scala.util.parsing.json.JSON
  * Time: 18:36
  */
 
+// TODO(molikto) merge imports from extra code
 
 object Utils {
 
   def typeRefName(t: JsonType) = t match {
-    case ObjectType(name, _) => name
+    case ObjectType(name, _, _) => name
     case a => a.toString
   }
 
@@ -25,6 +26,10 @@ object Utils {
     _counter += 1
     "new_var_" + _counter
   }
+}
+
+object MagicNumbers {
+  val INT_NULL = Integer.MAX_VALUE - 4223;
 }
 
 abstract class JsonType {
@@ -37,6 +42,12 @@ case object IntType extends JsonType {
 case object LongType extends JsonType {
   override def typeName = "long"
 }
+
+
+case object FloatType extends JsonType {
+  override def typeName = "float"
+}
+
 case object DoubleType extends JsonType {
   override def typeName = "double"
 }
@@ -56,8 +67,21 @@ case object BooleanType extends JsonType {
 }
 
 
+case object BoxedBooleanType extends JsonType {
+  override def typeName = "Boolean"
+}
+
+case object BoxedIntType extends JsonType {
+  override def typeName = "Integer"
+}
+
 case class Field(jsonFieldName: String, fieldName: String, var fieldType: JsonType, nullable: Boolean = true, serializable: Boolean = true) {
 
+  var _noDiff = false
+  def noDiff(): Field = {
+    _noDiff = true
+    this
+  }
 
   def convertedFieldType = fieldType match {
     case ConvertedType(_, c, _, _) => c
@@ -73,7 +97,13 @@ case class Field(jsonFieldName: String, fieldName: String, var fieldType: JsonTy
     s"""Field("${jsonFieldName}", "${fieldName}", ${Utils.typeRefName(fieldType)}${if (nullable) "" else ", false"})"""
   }
 }
-case class ObjectType(name: String, fields: Seq[Field]) extends JsonType {
+case class ObjectType(name: String, fields: Seq[Field], genereateDiff: Boolean = false) extends JsonType {
+  var _extends:String = null
+  def extends_(s: String): ObjectType = {
+    _extends = s
+    this
+  }
+
   override def typeName = name
   override def toString: String = s"""ObjectType("${name}", Seq(\n    ${fields.mkString(",\n    ")}))"""
 }
@@ -96,12 +126,33 @@ case class ConvertedType(originalType: JsonType, convertedType: JsonType, conver
   override def typeName: String = convertedType.typeName
 }
 
+val EXTRA_CODE_START = "/* EXTRA CODE START */"
+val EXTRA_CODE_MARK = "/* EXTRA CODE MARK */"
+val EXTRA_CODE_END = "/* EXTRA CODE END */"
+
 object ClassFile {
 }
-case class ClassFile(packageName: String, className: String, content: String) {
+case class ClassFile(packageName: String, className: String, var content: String) {
   def writeTo(dir: File) = {
     val des = new File(dir, className + ".java")
     des.mkdirs()
+    if (des.isFile) {
+      var extra = ""
+      var started = false
+      for (line <- io.Source.fromFile(des).getLines()) {
+        if (line.contains(EXTRA_CODE_START)) {
+          started = true
+        } else if (line.contains(EXTRA_CODE_END)) {
+          started = false
+        } else if (started) {
+          extra = extra + line + "\n"
+        }
+      }
+      if (!started) {
+        extra =  EXTRA_CODE_START + "\n" + extra + EXTRA_CODE_END
+        content = content.replace(EXTRA_CODE_MARK, extra)
+      }
+    }
     des.delete()
     des.createNewFile()
     val writer = new PrintWriter(des)
@@ -117,14 +168,18 @@ case class ClassFile(packageName: String, className: String, content: String) {
        | import com.fasterxml.jackson.core.JsonParser;
        | import com.fasterxml.jackson.core.JsonToken;
        | import com.fasterxml.jackson.core.JsonParseException;
+       |
+       | import android.support.annotation.NonNull;
+       |
        | import java.io.IOException;
-       | import java.io.StringWriter;
        | import java.io.InputStream;
-       |
+       | import java.io.Serializable;
+       | import java.io.StringWriter;
        | import java.util.ArrayList;
-       |
        | import java.util.Collections;
        | import java.util.List;
+       | import java.util.concurrent.atomic.AtomicLong;
+       | import java.util.regex.Pattern;
        |
        | ${content}
      """.stripMargin
@@ -151,20 +206,30 @@ object GenerateContent extends (Spec => Seq[ClassFile]) {
        | }
      """.stripMargin)
 
-  override def apply(v1: Spec): Seq[ClassFile] = v1.classSpecs.map(c => singleClass(v1, c)) ++ Seq(JsonFactory(v1), StreamParser(v1)) ++ v1.enumSpecs.map(c => singleEnum(v1, c))
+  override def apply(v1: Spec): Seq[ClassFile] = v1.classSpecs.map(c => {
+    Utils._counter = 0 // reset it so it is more stable, we do not got too many merge conflicts
+    singleClass(v1, c)
+  }) ++ Seq(JsonFactory(v1), StreamParser(v1)) ++ v1.enumSpecs.map(c => singleEnum(v1, c))
 
 
   def singleEnum(s: Spec, t: EnumType): ClassFile = ClassFile(s.packageName, t.clzName, {
 
     val JavaKeywords = Seq("default")
     def declear_item(s: String): String = {
-      if (JavaKeywords.contains(s)) s"""${s}_ { @Override public String toString(){ return "${s}";}}""" else s
+      if (JavaKeywords.contains(s))
+        s"""${s}_ { @Override public String toString(){ return "${s}";}}"""
+      else if (s.contains('-'))  s"""${s.replace('-', '_')} { @Override public String toString(){ return "${s}";}}"""
+      else s
     }
     val _override_value_if_necessary = {
       val keywords = JavaKeywords.toSet.intersect(t.vals.toSet)
       keywords.map(k =>
         s"""        if (${k}_.toString().equals(value)) return ${k}_;
+         """.stripMargin).mkString ++  {
+        t.vals.filter(_.contains('-')).map(k =>
+          s"""        if (${k.replace('-', '_')}.toString().equals(value)) return ${k.replace('-', '_')};
          """.stripMargin).mkString
+      }
     }
     s"""
      |public enum ${t.clzName} {
@@ -208,7 +273,7 @@ object GenerateContent extends (Spec => Seq[ClassFile]) {
           "arrayValue.add(parsed);"
         }
         val assgin_value = it match {
-          case IntType | BooleanType =>
+          case IntType | BooleanType | LongType | FloatType =>
             assgin_value_not_null
           case _ =>
             s"""
@@ -254,8 +319,11 @@ object GenerateContent extends (Spec => Seq[ClassFile]) {
       case StringType => "(jp.getCurrentToken() == JsonToken.VALUE_NULL ? null : jp.getText())"
       case EnumType(c, vals) => s"(jp.getCurrentToken() == JsonToken.VALUE_NULL ? null : ${c}.fromString((jp.getText())))"
       case BooleanType => "jp.getValueAsBoolean()"
+      case BoxedBooleanType => "jp.getValueAsBoolean()"
       case IntType => "jp.getValueAsInt()"
-      case ObjectType(a, _) => a + ".parse(jp)"
+      case FloatType => "((float) jp.getValueAsDouble())"
+      case BoxedIntType => "jp.getValueAsInt()"
+      case ObjectType(a, _, _) => a + ".parse(jp)"
       case ArrayType(t, length) => "arrayValue"
       case MapType(t) => "mapValue"
       case ConvertedType(o, c, converter, _) =>
@@ -270,9 +338,9 @@ object GenerateContent extends (Spec => Seq[ClassFile]) {
 
 
   def singleClass(spec: Spec, t: ObjectType): ClassFile = t match {
-    case ObjectType(name, fields) =>
+    case ObjectType(name, fields, genereateDiff) =>
       val dataFields = fields.map(field => {
-        s"public  ${field.fieldType.typeName} ${field.fieldName};"
+        s"${if (!field.nullable) "@NonNull" else ""} public  ${field.fieldType.typeName} ${field.fieldName};"
       }).mkString("\n")
 
 //      def copy_field_val(fieldType: JsonType, fromVal: String): (String, String) = fieldType match {
@@ -363,7 +431,7 @@ object GenerateContent extends (Spec => Seq[ClassFile]) {
                | }
              """.stripMargin
 
-          case ObjectType(_, _) =>
+          case ObjectType(_, _, _) =>
             s"""
                |
                | ${newValString}
@@ -371,11 +439,14 @@ object GenerateContent extends (Spec => Seq[ClassFile]) {
                |   ${varName}.serialize(generator, true);
                | }
              """.stripMargin
-          case IntType =>
+          case FloatType =>
             s"generator.writeNumber(${value});"
-          case BooleanType =>
+          case IntType | BoxedIntType=>
+            s"generator.writeNumber(${value});"
+          case BooleanType |BoxedBooleanType =>
             s"generator.writeBoolean(${value});"
           case ConvertedType(o, c, _, reverter) => Option(reverter) match {
+
             case None => "/* reverter not specificed, value cannot be written */"
             case Some(a) => write_if_not_null(o, s"${spec.converterClassName}.${reverter}(${value})", true)
           }
@@ -404,13 +475,26 @@ object GenerateContent extends (Spec => Seq[ClassFile]) {
                |   generator.writeStringField("${fieldName}", ${varName}.toString());
                | }
              """.stripMargin
+          case FloatType =>
+            s""" generator.writeNumberField("${fieldName}", ${value});"""
           case IntType =>
             s""" generator.writeNumberField("${fieldName}", ${value});"""
+          case BoxedIntType =>
+            s"""
+               | if (${varName} != null) {
+               |    generator.writeNumberField("${fieldName}", ${value});
+               | }
+             """.stripMargin
           case BooleanType =>
             s"""    generator.writeBooleanField("${fieldName}", ${value});"""
+          case BoxedBooleanType =>
+            s"""
+               | if (${varName} != null) {
+               |    generator.writeBooleanField("${fieldName}", ${value});
+               | }
+             """.stripMargin
           case t: ObjectType =>
             s"""
-               |
                | ${newValString}
                | if (${varName} != null) {
                |    generator.writeFieldName("${fieldName}");
@@ -442,22 +526,78 @@ object GenerateContent extends (Spec => Seq[ClassFile]) {
       }
 
 
+      def __field_equals(f: Field): String = {
+        f.convertedFieldType match {
+          case IntType | BooleanType | LongType | FloatType =>
+            s"${f.fieldName} == o.${f.fieldName}"
+          case _ =>
+            s"(${f.fieldName} == null && o.${f.fieldName} == null) || (${f.fieldName} !=null && ${f.fieldName}.equals(o.${f.fieldName})) "
+        }
+      }
+
+      def __write_d_diff(f: Field): String = {
+        if (!f._noDiff) {
+          f.convertedFieldType match {
+            case IntType | BooleanType | LongType | FloatType =>
+              "// TODO primitive type cannot have diff"
+            case ObjectType(n, _, true) =>
+              s"""
+           |
+           | if(${f.fieldName} == null && o.${f.fieldName} != null) {
+           |   d.${f.fieldName} = o.${f.fieldName};
+           | } else if (${f.fieldName} != null && !${f.fieldName}.equals(o.${f.fieldName})) {
+           |   d.${f.fieldName} = ${f.fieldName}.diff(o.${f.fieldName});
+           | }
+         """.stripMargin
+            case _ =>
+              s"""
+           |
+           | if ((${f.fieldName} == null && o.${f.fieldName} != null) || (${f.fieldName} != null && !${f.fieldName}.equals(o.${f.fieldName}))) {
+           |   d.${f.fieldName} = o.${f.fieldName};
+           | }
+         """.stripMargin
+        }
+        } else {
+          ""
+        }
+      }
 
       val parser =
         s"""
            |
            |
-           |     public static final class Parser implements StreamParser<${name}> {
+           |     public static class Parser implements StreamParser<${name}> {
            |         @Override
            |         public ${name} parse(InputStream in) throws IOException, JsonParseException {
            |            JsonParser jp = JsonFactoryHolder.APP_FACTORY.createParser(in);
            |            jp.nextToken();
            |            return ${name}.parse(jp);
            |        }
+           |}
+           |
+           |     public static class ArrayParser implements StreamParser<ArrayList<${name}>> {
+           |               @Override
+           |          public ArrayList<${name}> parse(InputStream in) throws IOException, JsonParseException {
+           |            JsonParser jp = JsonFactoryHolder.APP_FACTORY.createParser(in);
+           |            jp.nextToken();
+           |            ArrayList<${name}> arrayValue = null;
+           |            if (jp.getCurrentToken() == JsonToken.START_ARRAY) {
+           |                arrayValue = new ArrayList<${name}>();
+           |                while (jp.nextToken() != JsonToken.END_ARRAY) {
+           |                   ${name} parsed = ${name}.parse(jp);
+           |                   if (parsed != null) {
+           |                     arrayValue.add(parsed);
+           |  }
+           |}
+         | }
+         | jp.nextToken();
+         | return arrayValue;
+            | }
            |     }
            |     public static Parser parser = new Parser();
+           |     public static ArrayParser arrayParser = new ArrayParser();
            |
-           |  public static final ${name} parse(JsonParser jp) throws IOException {
+           |  public static ${name} parse(JsonParser jp) throws IOException {
            |    ${name} instance = new ${name}();
            |    if (jp.getCurrentToken() != JsonToken.START_OBJECT) {
            |      jp.skipChildren();
@@ -509,15 +649,53 @@ object GenerateContent extends (Spec => Seq[ClassFile]) {
            |       return null;
            |    }
            |  }
+           |
+           |
+           |
          """.stripMargin
+      val diff = if (genereateDiff) {
+        s"""
+         |   public ${name} diff(${name} o) {
+         |     ${name} d = new ${name}();
+         |     ${fields.map(__write_d_diff).mkString("\n")}
+         |     return d;
+         |   }
+         """.stripMargin
+      } else {
+        ""
+      }
       val content =
         s"""
+         |
+         |
+         |
          | /**
+         | except for code between the two "extra code" mark,
          | all content auto-generated, so do not modify. they will be overwritten
          | */
-         | public final class ${name} implements Cloneable {
+         | public final class ${name} ${if (t._extends != null) "extends " + t._extends else ""} implements Cloneable, Serializable {
+         |
+         |  ${EXTRA_CODE_MARK}
+         |
+         |
+         |
+         |
          |   ${dataFields}
          |   ${parser}
+         |
+         |
+         |
+         |  @Override
+         |   public boolean equals(Object obj) {
+         |    if (obj instanceof ${name}) {
+         |    ${name} o = (${name}) obj;
+         |     return (obj == this)  || (${fields.map(__field_equals).mkString(") &&\n       (")});
+         |    } else {
+         |      return false;
+         |    }
+         |   }
+         |
+         |   ${diff}
          |
          |   public ${name} deepCopy() {
          |   // the funny thing is that it is faster than java Serialization
@@ -627,6 +805,7 @@ trait Spec {
   val converterClassName: String
   val packageName: String
 }
+
 
 
 object TestSpec extends Spec {
